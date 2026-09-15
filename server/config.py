@@ -16,10 +16,14 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import sys
 from typing import Any, Dict
 
 log = logging.getLogger("config")
+
+# `%%DOWNLOAD_DIR` বা `%DOWNLOAD_DIR/.state` — দুই ফর্মই ধরা পড়ে; `%(id)s` ধরা পড়ে না
+_REFERENCE_RE = re.compile(r"^%+([A-Z_][A-Z0-9_]*)(.*)$", re.DOTALL)
 
 DEFAULTS: Dict[str, str] = {
     # --- সার্ভার ---
@@ -72,11 +76,25 @@ class Config:
         for key, default in DEFAULTS.items():
             setattr(self, key, env.get(key, default))
 
-        # %%NAME / %NAME ইনডিরেকশন (একবারই, MeTube-এর মতো)
-        for key, value in list(self.__dict__.items()):
-            if isinstance(value, str) and (value.startswith("%%") or value.startswith("%")):
-                target = value.lstrip("%")
-                setattr(self, key, getattr(self, target, ""))
+        # %%NAME / %NAME ইনডিরেকশন — MeTube-এর প্যাটার্ন, তবে সাফিক্সও সমর্থিত:
+        #   "%%DOWNLOAD_DIR"        → পুরো মান রেফারেন্স
+        #   "%DOWNLOAD_DIR/.state"  → রেফারেন্স + "/.state" (MeTube-এ এটা ছিল না, তাই
+        #                             পাথ-টেমপ্লেট চুপচাপ "" হয়ে যায় — ক্লাসিক কনফিগ ফাঁদ)
+        # `%(id)s.%(ext)s` টাইপের OUTPUT_TEMPLATE ছোঁয়া হয় না (regex-এ ( অক্ষর মেলে না)।
+        for _ in range(3):                       # নেস্টেড রেফারেন্সও কাজ করবে
+            changed = False
+            for key, value in list(self.__dict__.items()):
+                if isinstance(value, str) and value.startswith("%"):
+                    match = _REFERENCE_RE.match(value)
+                    if not match:
+                        continue
+                    target, rest = match.group(1), match.group(2)
+                    resolved = str(getattr(self, target, ""))
+                    if resolved != value:
+                        setattr(self, key, resolved + rest)
+                        changed = True
+            if not changed:
+                break
 
         for key in _BOOLEAN:
             value = getattr(self, key)

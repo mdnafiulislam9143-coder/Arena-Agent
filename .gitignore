@@ -4,8 +4,13 @@ cookies.txt
 .env
 server/clients.json          # লোকাল ওভাররাইড (env YT_CLIENTS_JSON-ও ব্যবহার করতে পারেন)
 
-# আউটপুট/ক্যাশ
+# আউটপুট/ক্যাশ/স্টেট (queue.json/completed.json রিপো রুটে পড়তে পারে)
 downloads/
+queue.json
+completed.json
+pending.json
+subscriptions.json
+*.invalid.*
 *.mp4
 *.webm
 *.part
