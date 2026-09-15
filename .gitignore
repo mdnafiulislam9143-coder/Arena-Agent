@@ -1,0 +1,15 @@
+# গোপনীয়তা — কখনো কমিট করবেন না
+cookies.txt
+*.cookies.txt
+.env
+server/clients.json          # লোকাল ওভাররাইড (env YT_CLIENTS_JSON-ও ব্যবহার করতে পারেন)
+
+# আউটপুট/ক্যাশ
+downloads/
+*.mp4
+*.webm
+*.part
+__pycache__/
+*.pyc
+.pytest_cache/
+node_modules/

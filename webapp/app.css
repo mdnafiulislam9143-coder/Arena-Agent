@@ -1,0 +1,151 @@
+/* KaiOS Tube — 240x320-কেন্দ্রিক, ডার্ক থিম, কোনো CSS ফ্রেমওয়ার্ক নয় (মেমরি বাঁচানোর জন্য) */
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: #0b0e13;
+  color: #e8edf5;
+  font: 13px/1.35 "Noto Sans Bengali", "Noto Sans", system-ui, sans-serif;
+  -webkit-user-select: none;
+  user-select: none;
+  overflow: hidden;
+}
+
+/* ডিভাইসে (240–320px) পুরো স্ক্রিন; ডেস্কটপ প্রিভিউতে মাঝ বরাবর থাকে */
+#app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  max-width: 320px;
+  margin: 0 auto;
+  background: #0b0e13;
+  box-shadow: 0 0 0 1px #1b2331;
+}
+
+/* ---------- টাইটেল বার ---------- */
+#titlebar {
+  flex: 0 0 22px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 6px;
+  background: #131922;
+  border-bottom: 1px solid #1f2733;
+  font-size: 12px;
+  font-weight: 700;
+  color: #cfe0ff;
+  letter-spacing: 0.2px;
+}
+#badge { font-weight: 400; font-size: 10px; color: #7f8da3; }
+
+/* ---------- স্ক্রিন ---------- */
+#screen {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  overflow-x: hidden;
+  outline: none;
+  -webkit-overflow-scrolling: touch;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  padding: 6px 7px;
+  border-bottom: 1px solid #171e28;
+  min-height: 40px;
+}
+.row .meta { flex: 1 1 auto; min-width: 0; }
+.row .t { font-size: 12.5px; font-weight: 600; color: #f2f6fc; }
+.row .s { font-size: 10.5px; color: #8b98ad; margin-top: 2px; }
+
+/* ফোকাস রিং — KaiOS-এ :focus অনেক সময় অদৃশ্য থাকে, তাই নিজের স্টাইল */
+.row.focused {
+  background: linear-gradient(90deg, #1b2a44 0%, #16202f 100%);
+  border-left: 3px solid #ffcf4a;
+  padding-left: 4px;
+}
+.row.focused .t { color: #ffffff; }
+
+.thumb {
+  width: 56px; height: 32px;
+  background: #1c2531;
+  border: 1px solid #26313f;
+  margin-right: 7px;
+  flex: 0 0 auto;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 9px; color: #5b687c;
+  overflow: hidden;
+}
+.thumb img { width: 100%; height: 100%; display: block; }
+
+/* ---------- তথ্য/ফর্ম ---------- */
+.pad { padding: 8px; }
+h2 { font-size: 13px; margin: 4px 0 8px; color: #d7e3f5; }
+.hint { font-size: 10.5px; color: #8494ab; margin: 6px 0; }
+.warn {
+  font-size: 10.5px;
+  background: #2a1f12;
+  border: 1px solid #4a3618;
+  color: #ffd79a;
+  padding: 6px;
+  margin: 6px 0;
+}
+.ok { color: #8ee39a; }
+.bad { color: #ff9b9b; }
+
+input[type=text], input[type=url], select {
+  width: 100%;
+  background: #101722;
+  color: #e8edf5;
+  border: 1px solid #2a3446;
+  padding: 6px;
+  font-size: 12px;
+  font-family: inherit;
+}
+input.focused, select.focused { border-color: #ffcf4a; background: #16202f; }
+
+.btn {
+  display: block;
+  width: 100%;
+  text-align: center;
+  padding: 7px;
+  margin: 4px 0;
+  background: #1b2534;
+  border: 1px solid #2c3849;
+  color: #e8edf5;
+  font-size: 12px;
+}
+.btn.focused { background: #22314a; border-color: #ffcf4a; color: #fff; }
+
+/* ---------- সফটকি বার ---------- */
+#softkeys {
+  flex: 0 0 20px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: #131922;
+  border-top: 1px solid #1f2733;
+  font-size: 11px;
+  color: #b9c6d9;
+  padding: 0 6px;
+}
+.sk { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#sk-left::before { content: "\25C0 "; color: #ffcf4a; }
+#sk-right::after { content: " \25B6"; color: #ffcf4a; }
+
+/* ---------- প্লেয়ার ---------- */
+#playerWrap {
+  position: absolute;
+  left: 0; right: 0; top: 22px; bottom: 20px;
+  background: #000;
+  display: flex; flex-direction: column;
+  z-index: 20;
+}
+video { width: 100%; height: auto; background: #000; }
+#pinfo { padding: 5px 7px; font-size: 11px; color: #d7e3f5; }
+#pstat { padding: 0 7px 5px; font-size: 10px; color: #8b98ad; }
+#bar { height: 4px; background: #223049; position: relative; }
+#barFill { height: 100%; width: 0; background: #ffcf4a; }
+#spinner { padding: 10px 7px; font-size: 11px; color: #9fb0c8; }

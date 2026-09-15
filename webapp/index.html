@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="bn">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+  <meta name="theme-color" content="#11151c">
+  <title>KaiOS Tube</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <div id="app">
+    <header id="titlebar">
+      <span id="title">KaiOS Tube</span>
+      <span id="badge"></span>
+    </header>
+
+    <main id="screen" tabindex="-1">
+      <!-- স্ক্রিনগুলো JS রেন্ডার করে (কম মেমরি, দ্রুত বদল) -->
+    </main>
+
+    <footer id="softkeys">
+      <span id="sk-left" class="sk">Back</span>
+      <span id="sk-center" class="sk"></span>
+      <span id="sk-right" class="sk">Options</span>
+    </footer>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

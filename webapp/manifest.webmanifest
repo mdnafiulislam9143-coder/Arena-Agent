@@ -1,0 +1,18 @@
+{
+  "name": "KaiOS Tube",
+  "short_name": "KaiOS Tube",
+  "description": "হালকা YouTube ক্লায়েন্ট — Innertube + yt-dlp প্রোক্সি",
+  "lang": "bn",
+  "dir": "ltr",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "cursor": false,
+  "theme_color": "#11151c",
+  "background_color": "#0b0e13",
+  "icons": [
+    { "src": "/icons/icon-56.png", "sizes": "56x56", "type": "image/png" },
+    { "src": "/icons/icon-112.png", "sizes": "112x112", "type": "image/png", "purpose": "any" }
+  ]
+}

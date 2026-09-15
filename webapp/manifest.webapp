@@ -1,0 +1,36 @@
+{
+  "name": "KaiOS Tube",
+  "description": "হালকা YouTube ক্লায়েন্ট — KaiOS 2.5/3.x-এর জন্য (Innertube + yt-dlp প্রোক্সি)",
+  "version": "1.0.0",
+  "author": "Arena Agent",
+  "type": "hosted",
+  "launch_path": "/",
+  "cursor": false,
+  "orientation": ["portrait"],
+  "fullscreen": false,
+  "locales": {
+    "bn": {
+      "name": "KaiOS Tube",
+      "description": "হালকা YouTube ক্লায়েন্ট — KaiOS-এর জন্য"
+    },
+    "en-US": {
+      "name": "KaiOS Tube",
+      "description": "Lightweight YouTube client for KaiOS"
+    }
+  },
+  "default_locale": "bn",
+  "icons": {
+    "56": "/icons/icon-56.png",
+    "112": "/icons/icon-112.png"
+  },
+  "permissions": {
+    "device-storage:videos": {
+      "access": "readwrite",
+      "description": "ডাউনলোড করা ভিডিও Videos ফোল্ডারে সেভ করার অনুমতি"
+    }
+  },
+  "developer": {
+    "name": "Arena Agent",
+    "url": "https://example.com"
+  }
+}
