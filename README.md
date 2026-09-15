@@ -5,11 +5,19 @@ KaiOS (২.৫ / ৩.০ / ৪.x) ফিচার-ফোনের জন্য �
 (`docs/kaios-youtube-handbook-bn.md`) — এটাই এই রিপোর "এক্সপার্ট গাইড"।
 
 ```
-webapp/     KaiOS hosted app (ES5-only, D-pad + সফটকি, 240×320)
-server/     stdlib-only Python প্রোক্সি: Innertube (fallback chain) + Range প্রোক্সি + yt-dlp পাইপ
-docs/       বাংলা হ্যান্ডবুক + Cloudflare Worker বিকল্প (Innertube প্রোক্সি)
+webapp/     KaiOS hosted app (ES5-only, D-pad + সফটকি, 240×320) — সার্চ, প্লেয়ার, ডাউনলোড কিউ
+server/     stdlib-only Python সার্ভার
+  ├── proxy.py       HTTP রাউট, Range/206 স্ট্রিমিং, স্ট্যাটিক অ্যাসেট
+  ├── dlqueue.py     ডাউনলোড কিউ (MeTube মডেল) — worker pool + persistence + cancel/retry
+  ├── config.py      env-ড্রিভেন Config (MeTube-এর _DEFAULTS/%% প্যাটার্ন)
+  ├── state_store.py AtomicJsonStore (atomic rename + fsync + quarantine + 0600)
+  ├── url_guard.py   SSRF গার্ড (loopback/RFC1918/NAT64 → ব্লক, fail-closed)
+  ├── innertube.py   Innertube fallback chain + PO Token সাপোর্ট
+  ├── formats.py     KaiOS-নিরাপদ ফরম্যাট বাছাই (H.264/itag 18) + Range লজিক
+  └── ytdlp_bridge.py CLI ফালব্যাক (pipe/stream/প্রোব/সেভ)
+docs/       বাংলা হ্যান্ডবুক · MeTube আর্কিটেকচার বিশ্লেষণ · Cloudflare Worker বিকল্প
 tools/      আইকন জেনারেটর (শূন্য ডিপেন্ডেন্সি)
-tests/      ইউনিট + এন্ড-টু-এন্ড টেস্ট (নেটওয়ার্ক ছাড়াই চলে)
+tests/      ৭৩টি টেস্ট (unittest, নেটওয়ার্ক ছাড়াই চলে)
 ```
 
 ## ৬০ সেকেন্ডে চালান
@@ -43,21 +51,47 @@ python3 -m unittest discover -s tests -v
 
 | রুট | কাজ |
 |---|---|
-| `GET /api/health` | মোড, ক্লায়েন্ট চেইন, yt-dlp/ffmpeg/JS-রানটাইম অবস্থা |
+| `GET /api/health` | মোড, ক্লায়েন্ট চেইন, কিউ কাউন্টার, yt-dlp/ffmpeg/JS-রানটাইম অবস্থা |
 | `GET /api/search?q=…` | Innertube সার্চ (উপরে ছেঁটে হালকা JSON) |
 | `GET /api/player?id=…&h=360` | মেটাডেটা + নির্বাচিত স্ট্রিম (`/api/stream/…`) + কেন বাছা হল তার ব্যাখ্যা |
-| `GET /api/stream/<id>?h=…` | Range/206 পাস-থ্রু (Innertube ডিরেক্ট, নইলে yt-dlp পাইপ) |
-| `GET /api/resolve?id=…` | ডায়াগনস্টিক: সব ক্লায়েন্টের ফরম্যাট টেবিল |
+| `GET /api/stream/<id>?h=…` | **ডাউনলোড করা ফাইল থাকলে সেটাই** (Range/206, seek কাজ করে), নইলে Innertube ডিরেক্ট → yt-dlp |
+| `POST /api/downloads` | `{url\|id, height?, audio_only?}` → সার্ভারে ডাউনলোড কিউতে যোগ (SSRF-যাচাই সহ) |
+| `GET /api/downloads` | `{queue, completed, stats}` — KaiOS-বান্ধব পোলিং (socket.io নয়) |
+| `POST /api/downloads/delete` | `{ids, where: queue\|done}` — বাতিল / completed থেকে সরানো |
+| `POST /api/downloads/start` | `{ids?}` — এরর/পেন্ডিং আইটেম রিট্রাই |
+| `GET /api/file/<id>` | সম্পন্ন ফাইল Range/206 সহ (path-containment যাচাই করা) |
+| `GET /api/resolve?id=…` | ডায়গনস্টিক: সব ক্লায়েন্টের ফরম্যাট টেবিল |
 
-## পরিবেশ ভেরিয়েবল (গুরুত্বপূর্ণ)
+### কেন "সার্ভারে নামাও, তারপর সার্ভ করো" (MeTube মডেল)
+স্ট্রিমিং-অনলি পথে তিনটি সমস্যা একসাথে আসে: googlevideo URL-এর IP-lock, PO-token/SABR-এ ফরম্যাট বাদ পড়া, আর KaiOS-এ MSE না থাকায় adaptive স্ট্রিম। ডাউনলোড করে ফেললেই তিনটাই শেষ: ফাইল সার্ভারে, Range/206 দিয়ে seek-সহ প্লেব্যাক, ডিভাইসের RAM/ডেটা বাঁচে, আর `completed.json`-এ কিউ বেঁচে থাকে রিস্টার্টেও। বিস্তারিত: `docs/metube-architecture-bn.md`।
+
+## পরিবেশ ভেরিয়েবল (MeTube-এর নামগুলোই, তাই চেনা লাগবে)
 
 ```bash
-export YT_PO_TOKEN="web.gvs+XXX"     # PO Token (২০২৬-এ প্রায়ই দরকার) — ডক §২.১.১
-export YT_VISITOR_DATA="Cgto..."     # টোকেন একই ভিজিটরের সাথে বাঁধা
-export YT_COOKIES=/etc/kaios-tube/cookies.txt   # chmod 600, কখনো কমিট নয়
+# --- ডিরেক্টরি ও কিউ (MeTube-সামঞ্জস্যপূর্ণ নাম) ---
+export DOWNLOAD_DIR=./downloads          # ডাউনলোড কোথায় যাবে
+export TEMP_DIR='%DOWNLOAD_DIR/tmp'      # %NAME ইনডিরেকশনও কাজ করে (MeTube-এর %% প্যাটার্ন)
+export STATE_DIR='%DOWNLOAD_DIR/.state'  # queue.json / completed.json (atomic লেখা)
+export MAX_CONCURRENT_DOWNLOADS=2        # ২৫৬MB ডিভাইস + হোস্ট বাঁচাতে ২
+export DELETE_FILE_ON_TRASHCAN=false     # completed থেকে মুছলে ফাইল থাকবে (ডিফল্ট)
+export OUTPUT_TEMPLATE='%(id)s.%(ext)s'
+# --- সার্ভার ---
+export HOST=0.0.0.0 PORT=8080 LOGLEVEL=INFO
+# --- yt-dlp / Innertube ---
+export YTDLP_MODE=auto                   # auto | off | force
+export YTDLP_FORMAT_HEIGHT=360           # KaiOS সিলিং
+export YTDLP_EXTRACTOR_ARGS='youtube:player_client=default,tv,tv_simply,tv_downgraded,ios,-android_sdkless'
+export COOKIES=/etc/kaios-tube/cookies.txt      # chmod 600, কখনো কমিট নয়
+export YT_PO_TOKEN="web.gvs+XXX"         # PO Token (২০২৬-এ প্রায়ই দরকার) — ডক §২.১.১
+export YT_VISITOR_DATA="Cgto..."         # টোকেন একই ভিজিটরের সাথে বাঁধা
 export YT_CLIENTS_JSON='[{"name":"TV","clientName":"TVHTML5","clientVersion":"7.20250205.16.00"}]'
 export YTDLP_BIN=/usr/local/bin/yt-dlp
+# --- নিরাপত্তা (SSRF) ---
+export ALLOWED_HOSTS=                # ফাঁকা = যেকোনো গ্লোবাল হোস্ট; কমা-দিয়ে allowlist
+export ALLOW_PRIVATE_ADDRESSES=false # true → লোকাল/প্রাইভেট ঠিকানায় ছাড় (Fake-IP/প্রক্সি সেটআপ)
 ```
+
+CLI ফ্ল্যাগ থাকলে সেটাই জেতে: `--download-dir`, `--state-dir`, `--max-concurrent`, `--socket-guard`, `--demo`, `--ytdlp` ইত্যাদি।
 
 ## ডিপ্লয়
 

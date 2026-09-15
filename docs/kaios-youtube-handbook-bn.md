@@ -241,6 +241,15 @@ VPS/কন্টেইনার: FastAPI/stdlib HTTP সার্ভার + yt-
 ➕ PO-token/SABR-এর বিরুদ্ধে সবচেয়ে শক্তিশালী, যেকোনো রেজোলিউশন, ডাউনলোড/সেভ, সাবটাইটেল।
 ➖ সার্ভার খরচ, IP ব্যান-ঝুঁকি (রেসিডেন্সিয়াল প্রোক্সি/rotating cookie দরকার হতে পারে), রক্ষণাবেক্ষণ।
 
+### অপশন E — ডাউনলোড-ফার্স্ট (MeTube মডেল, ২০২৬-এ এটাই সবচেয়ে টেকসই)
+MeTube যা করে: ইউজার URL দেয় → সার্ভার yt-dlp চালায় → **ফাইলই ফলাফল** → সার্ভ স্থানীয় ফাইল Range/206 দিয়ে।
+আমরা এটাকে কিউ সহ নিয়েছি (`server/dlqueue.py`): `POST /api/downloads` → worker pool (`MAX_CONCURRENT_DOWNLOADS`) →
+`completed.json`-এ স্টেট (atomic) → `/api/file/<id>` Range-সহ → `/api/stream/<id>` স্বয়ংক্রিয়ভাবে স্থানীয় ফাইল বেছে নেয়।
+➕ IP-lock/PO-token/SABR/MSE — চারটাই সমস্যা থেকে বাদ; seek কাজ করে; ডিভাইস RAM/ডেটা বাঁচে; প্লেব্যাক বারবার বাফার করে না।
+➖ ডিস্ক লাগে; `--ytdlp auto` হলে প্রথম প্লেতে কিছুটা দেরি (তারপর ক্যাশড)।
+👉 প্যাটার্ন: **স্ট্রিম হোক ফাস্ট-পাথ, ডাউনলোড হোক নিশ্চিত-পথ।** দুটো একসাথে রাখাই আমাদের আর্কিটেকচার।
+বিস্তারিত তুলনা: `docs/metube-architecture-bn.md`।
+
 ### অপশন D — হাইব্রিড (যা আমি প্রোডাকশনে করি)
 1. ফোন → নিজের প্রোক্সি (B/C) | 2. প্রোক্সি আগে Innertube (দ্রুত; কিছুই ডিস্কে যায় না) | 3. `streamingData` খালি/403 হলে → yt-dlp পাইপ (C) | 4. সব ফ্রন্টএন্ডে **রange-প্রোক্সি করা URL**, কখনো googlevideo URL নয় | 5. `sessionStorage`-এ ৩০ মিনিট মেটাডেটা ক্যাশ।
 
@@ -251,6 +260,7 @@ VPS/কন্টেইনার: FastAPI/stdlib HTTP সার্ভার + yt-
 | ব্যান-ঝুঁকি | কম | মাঝারি | উচ্চ | মাঝারি |
 | বানানো সহজ | ★★★ | ★★ | ★ | ★ |
 | KaiOS-এ স্থিতিশীলতা | ★ | ★★ | ★★★ | ★★★ |
+| ডিস্ক লাগে | না | না | হ্যাঁ | হ্যাঁ |
 
 আমাদের স্ক্যাফোল্ড: `server/proxy.py` (B-এর স্ট্রাকচার, কিন্তু Python-এ = C/D-এর হোস্ট) + `server/ytdlp_bridge.py` (ঐচ্ছিক C) + `webapp/` (A-এর ক্লায়েন্ট, প্রোক্সি-রেডি)।
 
@@ -270,6 +280,13 @@ VPS/কন্টেইনার: FastAPI/stdlib HTTP সার্ভার + yt-
 | Back কী-তে অ্যাপ বন্ধ | `Backspace` হ্যান্ডেল করা হয়নি | `keydown`-এ `Backspace` → নিজের নেভিগেশন |
 
 ডায়াগনস্টিক স্ক্রিপ্ট (রিপোতে আছে):
+```bash
+# পুরো কিউ ফ্লো (নেটওয়ার্ক ছাড়াই, ডেমো রানারে)
+curl -X POST localhost:8080/api/downloads -H 'Content-Type: application/json' \
+     -d '{"url":"https://youtu.be/dQw4w9WgXcQ","height":360}'
+curl -s localhost:8080/api/downloads | python3 -m json.tool     # status/progress/stats
+curl -s -D - -o /dev/null -H 'Range: bytes=0-1023' localhost:8080/api/file/dQw4w9WgXcQ
+```
 ```bash
 python3 server/proxy.py --port 8080 --demo      # অফলাইন ডেমো (নেটওয়ার্ক ছাড়াই চলে)
 python3 server/proxy.py --port 8080             # লাইভ: Innertube → yt-dlp fallback

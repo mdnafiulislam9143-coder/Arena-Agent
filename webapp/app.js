@@ -43,6 +43,9 @@
   /* ------------------------------------------------------------------ স্টেট */
   var state = {
     screen: 'home',
+    queue: { queue: [], completed: [], stats: {} },
+    queueSig: '',
+    queueTimer: null,
     focus: 0,
     rows: [],
     items: [],          /* সার্চ ফলাফল */
@@ -80,6 +83,28 @@
     xhr.ontimeout = function () { cb(new Error('সময় শেষ — সার্ভার ঠিকানা/নেটওয়ার্ক দেখুন'), null); };
     xhr.onerror = function () { cb(new Error('নেটওয়ার্ক ত্রুটি — সার্ভার চালু আছে? (সেটিংসে ঠিকানা দেখুন)'), null); };
     xhr.send();
+  }
+
+  function apiPost(path, payload, cb) {
+    var url = (cfg.server ? cfg.server.replace(/\/+$/, '') : '') + path;
+    var xhr = new XMLHttpRequest();
+    xhr.open('POST', url, true);
+    xhr.setRequestHeader('Content-Type', 'application/json');
+    xhr.timeout = 20000;
+    xhr.onreadystatechange = function () {
+      if (xhr.readyState !== 4) { return; }
+      var data = null;
+      try { data = JSON.parse(xhr.responseText); } catch (e) { data = null; }
+      if (xhr.status >= 200 && xhr.status < 300) { cb(null, data); }
+      else {
+        var msg = (data && data.error) ? data.error : ('HTTP ' + (xhr.status || 0));
+        if (data && data.hint) { msg += ' — ' + data.hint; }
+        cb(new Error(msg), data);
+      }
+    };
+    xhr.ontimeout = function () { cb(new Error('সময় শেষ'), null); };
+    xhr.onerror = function () { cb(new Error('নেটওয়ার্ক ত্রুটি (সার্ভার চালু আছে?)'), null); };
+    xhr.send(JSON.stringify(payload || {}));
   }
 
   /* --------------------------------------------------------------- হেল্পার */
@@ -130,12 +155,24 @@
         })(recent[r]);
       }
     }
-    addRow('📥 লিংক/ID দিয়ে চালান', 'youtu.be/… বা ১১ অক্ষরের ID পেস্ট করুন', function () { go('link'); });
+    addRow('📥 ডাউনলোড কিউ' + queueBadge(),
+      'সার্ভারে নামিয়ে রাখুন — তারপর Range/206 সহ ঝরঝরে প্লেব্যাক',
+      function () { go('queue'); });
+    addRow('🔗 লিংক/ID দিয়ে চালান', 'youtu.be/… বা ১১ অক্ষরের ID পেস্ট করুন', function () { go('link'); });
     addRow('⚙ সেটিংস', 'সার্ভার ঠিকানা, গুণমান, ভাষা', function () { go('settings'); });
     addRow('❓ সহায়তা', 'KaiOS-এ কেন ভিডিও নাও চলতে পারে', function () { go('help'); });
 
     setSoftkeys('বেরিয়ে যান', '', 'রিফ্রেশ');
     focus(0);
+  }
+
+  function queueBadge() {
+    var st = state.queue && state.queue.stats ? state.queue.stats : null;
+    if (!st) { return ''; }
+    var active = (st.queueing || 0) + (st.downloading || 0);
+    if (active) { return ' (' + active + ' চলছে)'; }
+    if (st.finished) { return ' (' + st.finished + ' সম্পন্ন)'; }
+    return '';
   }
 
   function addRow(title, sub, onOk, extraClass) {
@@ -359,7 +396,8 @@
       setStatus('রেজোলিউশন ' + state.quality + 'p — পুনরায় লোড হচ্ছে');
       renderPlayer();
     });
-    addRow('📥 ডাউনলোড করে ফোনে সেভ', 'অফলাইনে দেখতে (KaiOS-এ সবচেয়ে নির্ভরযোগ্য)', downloadStart);
+    addRow('📥 ডাউনলোড করে ফোনে সেভ', 'স্ট্রিমটি ফোনে সেভ (KaiOS DeviceStorage)', downloadStart);
+    addRow('🏠 সার্ভারে নামিয়ে রাখুন', 'ডিভাইস মেমরি বাঁচে, পরে যেকোনো সময় Range-সহ দেখুন', queueCurrentVideo);
     addRow('🔁 রিলোড', 'মেটাডেটা ও স্ট্রিম আবার আনুন', function () {
       var vid = state.video && state.video.video ? state.video.video.id : '';
       state.video = null; openVideo(vid);
@@ -555,6 +593,136 @@
     elTitle.textContent = 'সহায়তা';
   }
 
+  /* ------------------------------------------------------ স্ক্রিন: ডাউনলোড কিউ */
+  function queueCurrentVideo() {
+    var v = state.video;
+    if (!v || !v.video) { return; }
+    apiPost('/api/downloads', { url: v.video.id, height: state.quality }, function (err, data) {
+      if (err) { toastError('কিউতে যোগ করা যায়নি: ' + err.message); return; }
+      if (data && data.item) { setStatus('কিউতে যোগ হয়েছে: ' + data.item.id); }
+      go('queue');
+    });
+  }
+
+  function statusLabel(item) {
+    if (item.status === 'queueing') { return 'অপেক্ষায়'; }
+    if (item.status === 'downloading') { return 'নামছে ' + Math.round(item.progress || 0) + '%'; }
+    if (item.status === 'finished') { return 'সম্পন্ন · ' + Math.round((item.filesize || 0) / 1024) + ' KB'; }
+    if (item.status === 'error') { return 'ত্রুটি: ' + (item.error || ''); }
+    return item.status || '';
+  }
+
+  function renderQueue() {
+    clear(elScreen);
+    state.rows = [];
+    var st = state.queue.stats || {};
+    var wrap = tag('div', 'pad');
+    wrap.appendChild(tag('h2', null, 'ডাউনলোড কিউ'));
+    wrap.appendChild(tag('div', 'hint',
+      'চলছে: ' + ((st.queueing || 0) + (st.downloading || 0)) + ' · সম্পন্ন: ' + (st.finished || 0) +
+      ' · একসাথে সর্বোচ্চ: ' + (st.max_concurrent || '?') +
+      ' — সার্ভারে নামলে ফাইলটি Range/206 সহ পাওয়া যায় (seek কাজ করে, IP-lock নেই)।'));
+    elScreen.appendChild(wrap);
+
+    var all = (state.queue.queue || []).concat(state.queue.completed || []);
+    if (!all.length) {
+      wrap.appendChild(tag('div', 'hint', 'কিউ ফাঁকা। প্লেয়ার অপশন থেকে "সার্ভারে নামিয়ে রাখুন" বেছে নিন।'));
+      setSoftkeys('ফিরে যান', '', 'রিফ্রেশ');
+      return;
+    }
+
+    for (var i = 0; i < all.length; i++) {
+      (function (item) {
+        var row = tag('div', 'row');
+        var meta = tag('div', 'meta');
+        meta.appendChild(tag('div', 't', item.title || item.id));
+        meta.appendChild(tag('div', 's', statusLabel(item)));
+        if (item.status === 'downloading' || item.status === 'queueing') {
+          var bar = tag('div', 'qbar');
+          var fill = tag('div', 'qfill');
+          fill.style.width = Math.max(2, Math.min(100, item.progress || 0)) + '%';
+          bar.appendChild(fill);
+          meta.appendChild(bar);
+        }
+        row.appendChild(meta);
+        row.addEventListener('click', function () { queueActivate(item); });
+        elScreen.appendChild(row);
+        state.rows.push({ node: row, item: item, onOk: function () { queueActivate(item); } });
+      })(all[i]);
+    }
+    elTitle.textContent = 'ডাউনলোড কিউ';
+    setSoftkeys('ফিরে যান', '', 'মুছুন');
+    focus(Math.min(state.focus, state.rows.length - 1));
+  }
+
+  function queueActivate(item) {
+    if (item.status === 'finished' && item.file_url) {
+      state.video = {
+        ok: true,
+        client: 'server-file',
+        video: { id: item.id, title: item.title || item.id, author: item.author || '',
+                 duration: item.duration || 0, description: '' },
+        stream: { url: item.file_url, mode: 'local', height: item.height || state.quality,
+                  mime: 'video/mp4', itag: null, kaios_safe: true,
+                  reason: 'সার্ভারে ডাউনলোড করা ফাইল — Range/206 সহ, seek কাজ করে' }
+      };
+      go('player');
+      return;
+    }
+    if (item.status === 'error') {
+      apiPost('/api/downloads/start', { ids: [item.id] }, function (err) {
+        if (err) { toastError(err.message); }
+        pollQueue(true);
+      });
+      return;
+    }
+    setStatus(statusLabel(item));
+  }
+
+  function queueDeleteCurrent() {
+    var row = state.rows[state.focus];
+    if (!row || !row.item) { setStatus('মুছতে একটি আইটেম বেছে নিন'); return; }
+    var item = row.item;
+    var where = item.status === 'finished' ? 'done' : 'queue';
+    apiPost('/api/downloads/delete', { ids: [item.id], where: where }, function (err) {
+      if (err) { toastError(err.message); }
+      pollQueue(true);
+    });
+  }
+
+  function pollQueue(force) {
+    api('/api/downloads', function (err, data) {
+      if (err) {
+        if (force) { toastError('কিউ পড়া যায়নি: ' + err.message); }
+        stopQueuePolling();
+        return;
+      }
+      // সিগনেচারে প্রতি-আইটেম স্টেটাস+প্রগ্রেস রাখি, নাহলে প্রগ্রেস বার আপডেট হবে না
+      var parts = [], qs = (data.queue || []), cs = (data.completed || []);
+      for (var qi = 0; qi < qs.length; qi++) {
+        parts.push(qs[qi].id + ':' + qs[qi].status + ':' + Math.round(qs[qi].progress || 0));
+      }
+      for (var ci = 0; ci < cs.length; ci++) { parts.push(cs[ci].id + ':' + cs[ci].status); }
+      var sig = parts.join('|');
+      var changed = (sig !== state.queueSig);
+      state.queue = data;
+      state.queueSig = sig;
+      if (state.screen === 'queue' && (changed || force)) { renderQueue(); }
+      if (state.screen === 'home') { renderHome(); }
+      if (state.screen !== 'queue') { stopQueuePolling(); }
+    });
+  }
+
+  function startQueuePolling() {
+    stopQueuePolling();
+    state.queueTimer = window.setInterval(function () { pollQueue(false); }, 2500);
+    pollQueue(true);
+  }
+
+  function stopQueuePolling() {
+    if (state.queueTimer) { window.clearInterval(state.queueTimer); state.queueTimer = null; }
+  }
+
   /* ----------------------------------------------------------- নেভিগেশন */
   function go(name) {
     if (state.screen === 'player' && name !== 'player') { stopPlayback(); }
@@ -568,7 +736,9 @@
     else if (name === 'link') { renderLink(); }
     else if (name === 'settings') { renderSettings(); }
     else if (name === 'help') { renderHelp(); }
+    else if (name === 'queue') { startQueuePolling(); renderQueue(); }
     else if (name === 'loading') { renderLoading(); }
+    if (name !== 'queue') { stopQueuePolling(); }
   }
 
   function renderLoading() {
@@ -597,7 +767,8 @@
 
   function back() {
     if (state.screen === 'player' || state.screen === 'playerOptions') { go('playerOptions' === state.screen ? 'player' : 'results'); }
-    else if (state.screen === 'results' || state.screen === 'search' || state.screen === 'settings' || state.screen === 'help' || state.screen === 'link') { go('home'); }
+    else if (state.screen === 'results' || state.screen === 'search' || state.screen === 'settings' ||
+             state.screen === 'help' || state.screen === 'link' || state.screen === 'queue') { go('home'); }
     else { try { window.close(); } catch (e) { } }
   }
 
@@ -637,6 +808,7 @@
         else if (screen === 'settings') { cfg.server = ($('q') || {}).value || cfg.server; saveJSON(CFG_KEY, cfg); go('home'); }
         else if (screen === 'playerOptions') { stopPlayback(); go('results'); }
         else if (screen === 'help') { go('settings'); }
+        else if (screen === 'queue') { queueDeleteCurrent(); }
         ev.preventDefault(); break;
       default: break;
     }
@@ -663,7 +835,12 @@
   /* ------------------------------------------------------------ শুরু */
   function start() {
     state.quality = cfg.maxHeight;
-    checkHealth(function () { go('home'); });
+    checkHealth(function () {
+      api('/api/downloads', function (err, data) {
+        if (!err && data) { state.queue = data; }
+        go('home');
+      });
+    });
   }
 
   window.addEventListener('load', start, false);

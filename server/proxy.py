@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import mimetypes
 import os
 import re
@@ -31,9 +32,13 @@ from typing import Any, Dict, Optional, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import clients  # noqa: E402
+import config as config_mod  # noqa: E402
+import dlqueue as queue_mod  # noqa: E402          # নাম stdlib `queue`-র সাথে সংঘর্ষ এড়াতে
 import formats  # noqa: E402
 import innertube  # noqa: E402
-import clients  # noqa: E402
+import state_store  # noqa: E402
+import url_guard  # noqa: E402
 
 try:
     import ytdlp_bridge  # noqa: E402
@@ -47,6 +52,8 @@ META_TTL = 1800          # ৩০ মিনিট — মেটাডেটা �
 _META: Dict[str, Tuple[float, Dict[str, Any]]] = {}
 
 ARGS = argparse.Namespace()
+CONFIG = None            # config.Config — MeTube-স্টাইল env-ভিত্তিক কনফিগ
+QUEUE = None             # dlqueue.DownloadQueue — সার্ভার-সাইড ডাউনলোড কিউ (MeTube মডেল)
 
 
 # --------------------------------------------------------------------------- helpers
@@ -88,6 +95,24 @@ def demo_bytes(video_id: str, start: int, end: int) -> bytes:
 
 
 # --------------------------------------------------------------------------- handler
+
+def queue_stats(deep: bool = False) -> Optional[Dict[str, Any]]:
+    """কিউয়ের সংক্ষিপ্ত স্ট্যাট (MeTube UI-র কাউন্টারগুলোর মতো) বা None যদি কিউ না থাকে।"""
+    if QUEUE is None:
+        return None
+    data = QUEUE.list_all()
+    stats = {
+        "queueing": len([i for i in data["queue"] if i["status"] == "queueing"]),
+        "downloading": len([i for i in data["queue"] if i["status"] == "downloading"]),
+        "errored": len([i for i in data["queue"] if i["status"] == "error"]),
+        "finished": len([i for i in data["completed"] if i["status"] == "finished"]),
+        "max_concurrent": CONFIG.MAX_CONCURRENT_DOWNLOADS if CONFIG else None,
+    }
+    if deep:
+        stats["queue"] = data["queue"]
+        stats["completed"] = data["completed"]
+    return stats
+
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
@@ -143,6 +168,40 @@ class Handler(BaseHTTPRequestHandler):
     def do_HEAD(self) -> None:  # noqa: N802
         self.do_GET()
 
+    def do_POST(self) -> None:  # noqa: N802
+        parsed = urllib.parse.urlparse(self.path)
+        route = parsed.path
+        try:
+            if route == "/api/downloads":
+                return self._downloads_add()
+            if route == "/api/downloads/delete":
+                return self._downloads_delete()
+            if route == "/api/downloads/start":
+                return self._downloads_start()
+            return self._error("রুট পাওয়া যায়নি: %s" % route, 404)
+        except BrokenPipeError:
+            return
+        except Exception as exc:  # noqa: BLE001
+            return self._error("অভ্যন্তরীণ ত্রুটি: %s" % exc, 500)
+
+    def _read_json(self, limit: int = 65536) -> Dict[str, Any]:
+        """JSON বডি পড়া — সাইজ সীমা সহ (MeTube-এর cookie-আপলোডে 1MB সীমার মতোই নীতি)।"""
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        if length <= 0:
+            return {}
+        if length > limit:
+            raise ValueError("বডি অনেক বড় (সর্বোচ্চ %d বাইট)" % limit)
+        raw = self.rfile.read(length)
+        if not raw:
+            return {}
+        data = json.loads(raw.decode("utf-8", "replace"))
+        if not isinstance(data, dict):
+            raise ValueError("JSON বডি অবজেক্ট হতে হবে")
+        return data
+
     def do_GET(self) -> None:  # noqa: N802
         parsed = urllib.parse.urlparse(self.path)
         route = parsed.path
@@ -158,6 +217,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._player(query)
             if route == "/api/resolve":
                 return self._resolve(query)
+            if route == "/api/downloads":
+                return self._downloads_list()
+            if route.startswith("/api/file/"):
+                return self._serve_file(route.rsplit("/", 1)[-1])
             if route == "/api/transcript":
                 return self._transcript(query)
             if route.startswith("/api/stream/"):
@@ -188,6 +251,14 @@ class Handler(BaseHTTPRequestHandler):
             "ytdlp": yt,
             "clients": [c["name"] for c in clients.load_chain()],
             "allow_direct": bool(ARGS.allow_direct),
+            "download_dir": CONFIG.DOWNLOAD_DIR if CONFIG else None,
+            "state_dir": CONFIG.STATE_DIR if CONFIG else None,
+            "max_concurrent": CONFIG.MAX_CONCURRENT_DOWNLOADS if CONFIG else None,
+            "downloads": queue_stats(),
+            "url_guard": {
+                "allow_private": bool(CONFIG.ALLOW_PRIVATE_ADDRESSES) if CONFIG else False,
+                "allowed_hosts": (CONFIG.ALLOWED_HOSTS_LIST if CONFIG else []),
+            },
         })
 
     def _search(self, query: Dict[str, list]) -> None:
@@ -207,6 +278,11 @@ class Handler(BaseHTTPRequestHandler):
         vid = video_id_of((query.get("id") or [""])[0])
         if not vid:
             return self._error("বৈধ video id/URL দিন (?id=…)", 400)
+
+        raw_value = (query.get("id") or [""])[0]
+        guard_error = self._guard_url(raw_value)
+        if guard_error:
+            return self._error("URL প্রত্যাখ্যাত: %s" % guard_error, 400)
 
         cached = meta_cached(vid)
         if cached:
@@ -286,6 +362,142 @@ class Handler(BaseHTTPRequestHandler):
         return self._error("লাইভ transcript এখনো যুক্ত হয়নি", 501,
                            "yt-dlp --write-auto-subs ব্যবহার করুন (ডক §৩.১)")
 
+    # ---- ডাউনলোড কিউ (MeTube মডেল: আগে সার্ভারে নামাও, তারপর Range দিয়ে সার্ভ করো) ----
+    def _guard_url(self, value: str) -> Optional[str]:
+        """ইনগ্রেসে SSRF যাচাই (url_guard) — URL না হলে (বেয়ার ID) কিছুই করে না।"""
+        if not value or "://" not in value:
+            return None
+        return url_guard.validate_url(
+            value,
+            allow_private=bool(CONFIG and CONFIG.ALLOW_PRIVATE_ADDRESSES),
+            allowed_hosts=(CONFIG.ALLOWED_HOSTS_LIST if CONFIG else []),
+        )
+
+    def _downloads_list(self) -> None:
+        if QUEUE is None:
+            return self._error("ডাউনলোড কিউ চালু নেই", 503)
+        data = QUEUE.list_all()
+        self._json({
+            "ok": True,
+            "queue": data["queue"],
+            "completed": data["completed"],
+            "stats": {
+                "queueing": len([i for i in data["queue"] if i["status"] == "queueing"]),
+                "downloading": len([i for i in data["queue"] if i["status"] == "downloading"]),
+                "finished": len([i for i in data["completed"] if i["status"] == "finished"]),
+                "max_concurrent": (CONFIG.MAX_CONCURRENT_DOWNLOADS if CONFIG else 1),
+            },
+        })
+
+    def _downloads_add(self) -> None:
+        if QUEUE is None:
+            return self._error("ডাউনলোড কিউ চালু নেই", 503)
+        body = self._read_json()
+        url = str(body.get("url") or body.get("id") or "").strip()
+        if not url:
+            return self._error("'url' বা 'id' দরকার", 400)
+        guard_error = self._guard_url(url)
+        if guard_error:
+            return self._error("URL প্রত্যাখ্যাত: %s" % guard_error, 400,
+                               "ইন্টারনাল/প্রাইভেট ঠিকানা ব্লক করা আছে (ALLOW_PRIVATE_ADDRESSES=true দিলে ছাড় পাবেন)")
+        try:
+            height = int(body.get("height") or (CONFIG.YTDLP_FORMAT_HEIGHT if CONFIG else 360))
+        except (TypeError, ValueError):
+            return self._error("height সংখ্যা হতে হবে", 400)
+        try:
+            result = QUEUE.add(url, height=height, audio_only=bool(body.get("audio_only")))
+        except ValueError as exc:
+            return self._error(str(exc), 400)
+        if result.get("status") != "ok":
+            return self._json({"ok": False, "error": result.get("msg"), "item": result.get("item")}, 409)
+        self._json({"ok": True, "item": result["item"]})
+
+    def _downloads_delete(self) -> None:
+        if QUEUE is None:
+            return self._error("ডাউনলোড কিউ চালু নেই", 503)
+        body = self._read_json()
+        ids = body.get("ids")
+        if isinstance(ids, str):
+            ids = [ids]
+        if ids is not None and not isinstance(ids, list):
+            return self._error("'ids' লিস্ট হতে হবে", 400)
+        where = body.get("where") or "queue"
+        if where not in ("queue", "done"):
+            return self._error("'where' হবে queue বা done", 400)
+        ids = [str(i) for i in (ids or [])]
+        result = QUEUE.cancel(ids) if where == "queue" else QUEUE.clear(ids)
+        self._json({"ok": result.get("status") == "ok", **result})
+
+    def _downloads_start(self) -> None:
+        if QUEUE is None:
+            return self._error("ডাউনলোড কিউ চালু নেই", 503)
+        body = self._read_json()
+        ids = body.get("ids")
+        if isinstance(ids, list):
+            ids = [str(i) for i in ids]
+        else:
+            ids = None
+        self._json({"ok": True, **QUEUE.start_pending(ids)})
+
+    # ---- সম্পন্ন ফাইল সার্ভিং (MeTube-এর PUBLIC_HOST_URL পথের সমতুল্য) ----
+    def _serve_file(self, item_id: str) -> None:
+        if QUEUE is None:
+            return self._error("ডাউনলোড কিউ চালু নেই", 503)
+        item = QUEUE.get(item_id)
+        if not item or not item.get("filepath") or item["status"] != "finished":
+            return self._error("ফাইল পাওয়া যায়নি (আইটেম %s)" % item_id, 404,
+                               "আগে /api/downloads দিয়ে ডাউনলোড শুরু করুন")
+        return self._serve_local(item["filepath"], self.headers.get("Range"))
+
+    def _serve_local(self, path: str, range_header: Optional[str]) -> None:
+        """
+        স্থানীয় ফাইল Range/206 সহ পরিবেশন — KaiOS-এর প্লেয়ার seek করার জন্য এটাই দরকার।
+        path traversal ঠেকাতে realpath DOWNLOAD_DIR-এর ভেতরে আছে কি না যাচাই করা হয়।
+        """
+        real = os.path.realpath(path)
+        root = os.path.realpath(CONFIG.DOWNLOAD_DIR if CONFIG else os.getcwd())
+        if not real.startswith(root + os.sep) and real != root:
+            return self._error("ফাইল পাথ অনুমোদিত ডিরেক্টরির বাইরে", 403)
+        if not os.path.isfile(real):
+            return self._error("ফাইল নেই: %s" % os.path.basename(real), 404)
+
+        total = os.path.getsize(real)
+        status, start, end = formats.resolve_range(range_header, total)
+        if status == 416:
+            self.send_response(416)
+            self.send_header("Content-Range", "bytes */%d" % total)
+            self.send_header("Content-Length", "0")
+            self._cors()
+            self.end_headers()
+            return
+
+        ctype = mimetypes.guess_type(real)[0] or "video/mp4"
+        length = end - start + 1
+        self.send_response(status)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(length))
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Cache-Control", "public, max-age=3600")
+        self.send_header("Content-Disposition", 'inline; filename="%s"' % os.path.basename(real))
+        if status == 206:
+            self.send_header("Content-Range", "bytes %d-%d/%d" % (start, end, total))
+        self._cors()
+        self.end_headers()
+        if self.command == "HEAD":
+            return
+        try:
+            with open(real, "rb") as fh:
+                fh.seek(start)
+                remaining = length
+                while remaining > 0:
+                    chunk = fh.read(min(CHUNK, remaining))
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    remaining -= len(chunk)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
     # ---- স্ট্রিম ------------------------------------------------------------
     def _stream(self, video_id: str, query: Optional[Dict[str, list]] = None) -> None:
         query = query or {}
@@ -295,6 +507,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._error("বৈধ video id দিন", 400)
 
         range_header = self.headers.get("Range")
+
+        # ০) ডাউনলোড সম্পন্ন হলে স্থানীয় ফাইলই সেরা: Range/206 + seek + IP-lock নেই
+        if QUEUE is not None:
+            local = QUEUE.find_file(vid)
+            if local:
+                return self._serve_local(local, range_header)
 
         # ১) ডেমো মোড — অফলাইন সিন্থেটিক বাইট
         if ARGS.demo:
@@ -450,32 +668,88 @@ def demo_search_items(q: str) -> list:
 
 
 def main() -> int:
-    global ARGS
-    ap = argparse.ArgumentParser(description="KaiOS Tube প্রোক্সি — Innertube + yt-dlp")
-    ap.add_argument("--host", default="0.0.0.0", help="bind address (ডিফল্ট 0.0.0.0)")
-    ap.add_argument("--port", type=int, default=8080)
-    ap.add_argument("--demo", action="store_true",
-                    help="নেটওয়ার্ক ছাড়াই চলে: ডেমো সার্চ/player/স্ট্রিম (UI টেস্টের জন্য)")
-    ap.add_argument("--max-height", type=int, default=360, help="KaiOS-এর জন্য সর্বোচ্চ উচ্চতা (ডিফল্ট 360)")
-    ap.add_argument("--hl", default="bn", help="ভাষা (bn, en, hi …)")
-    ap.add_argument("--gl", default="BD", help="অঞ্চল (BD, IN, US …)")
-    ap.add_argument("--ytdlp", choices=("auto", "off", "force"), default="auto",
+    global ARGS, CONFIG, QUEUE
+
+    CONFIG = config_mod.Config()
+    logging.basicConfig(level=config_mod.parse_log_level(CONFIG.LOGLEVEL))
+
+    ap = argparse.ArgumentParser(
+        description="KaiOS Tube প্রোক্সি — Innertube + yt-dlp + ডাউনলোড কিউ (MeTube মডেল)")
+    # ডিফল্টগুলো env (Config) থেকে আসে → MeTube-এর মতো env-driven, আর CLI দিয়ে ওভাররাইড
+    ap.add_argument("--host", default=CONFIG.HOST, help="bind address (ডিফল্ট env HOST / 0.0.0.0)")
+    ap.add_argument("--port", type=int, default=CONFIG.PORT)
+    ap.add_argument("--demo", action="store_true", default=CONFIG.DEMO,
+                    help="নেটওয়ার্ক ছাড়াই চলে: ডেমো সার্চ/player/ডাউনলোড (UI টেস্টের জন্য)")
+    ap.add_argument("--max-height", type=int, default=CONFIG.MAX_HEIGHT,
+                    help="KaiOS-এর জন্য সর্বোচ্চ উচ্চতা (ডিফল্ট 360)")
+    ap.add_argument("--hl", default=CONFIG.HL, help="ভাষা (bn, en, hi …)")
+    ap.add_argument("--gl", default=CONFIG.GL, help="অঞ্চল (BD, IN, US …)")
+    ap.add_argument("--ytdlp", choices=("auto", "off", "force"), default=CONFIG.YTDLP_MODE,
                     help="auto=আগে Innertube, দরকারে yt-dlp | force=সবসময় yt-dlp | off=শুধু Innertube")
-    ap.add_argument("--cookies", default=os.environ.get("YT_COOKIES"),
+    ap.add_argument("--cookies", default=CONFIG.COOKIES or os.environ.get("YT_COOKIES"),
                     help="cookies.txt পাথ (লগইন-সীমিত ভিডিওর জন্য; কখনো কমিট করবেন না)")
-    ap.add_argument("--allow-direct", action="store_true",
+    ap.add_argument("--allow-direct", action="store_true", default=CONFIG.ALLOW_DIRECT,
                     help="ডিবাগ: /api/player-এ raw googlevideo URL দিন (IP-lock-এর কারণে সাধারণত কাজ করবে না)")
+    ap.add_argument("--download-dir", default=CONFIG.DOWNLOAD_DIR,
+                    help="ডাউনলোড কোথায় সেভ হবে (env DOWNLOAD_DIR)")
+    ap.add_argument("--state-dir", default=CONFIG.STATE_DIR,
+                    help="queue.json/completed.json কোথায় থাকবে (env STATE_DIR)")
+    ap.add_argument("--max-concurrent", type=int, default=CONFIG.MAX_CONCURRENT_DOWNLOADS,
+                    help="একসাথে সর্বোচ্চ ডাউনলোড (env MAX_CONCURRENT_DOWNLOADS, ডিফল্ট ২)")
+    ap.add_argument("--socket-guard", action="store_true",
+                    help="নিজের প্রসেসে কানেক্ট-টাইম SSRF গার্ড ইনস্টল করুন (url_guard)")
     ARGS = ap.parse_args()
 
-    httpd = ThreadingHTTPServer((ARGS.host, ARGS.port), Handler)
-    print("KaiOS Tube প্রোক্সি → http://%s:%d  (mode=%s, max_height=%dp, ytdlp=%s)"
-          % (ARGS.host, ARGS.port, "demo" if ARGS.demo else "live", ARGS.max_height, ARGS.ytdlp))
+    # CLI মানগুলো আবার Config-এ ফেরত (একটাই সত্যের সূত্র রাখতে)
+    CONFIG.HOST = ARGS.host
+    CONFIG.PORT = int(ARGS.port)
+    CONFIG.DEMO = bool(ARGS.demo)
+    CONFIG.MAX_HEIGHT = ARGS.max_height
+    CONFIG.HL = ARGS.hl
+    CONFIG.GL = ARGS.gl
+    CONFIG.YTDLP_MODE = ARGS.ytdlp
+    CONFIG.COOKIES = ARGS.cookies or ""
+    CONFIG.ALLOW_DIRECT = bool(ARGS.allow_direct)
+    CONFIG.DOWNLOAD_DIR = ARGS.download_dir
+    CONFIG.STATE_DIR = ARGS.state_dir
+    CONFIG.MAX_CONCURRENT_DOWNLOADS = max(1, int(ARGS.max_concurrent))
+    CONFIG.ensure_dirs()
+
+    if ARGS.socket_guard and not CONFIG.ALLOW_PRIVATE_ADDRESSES:
+        url_guard.install_socket_guard(allow_private=False,
+                                       allowed_hosts=CONFIG.ALLOWED_HOSTS_LIST)
+        print("SSRF সকেট গার্ড ইনস্টল করা হলো (ALLOWED_HOSTS: %s)"
+              % (", ".join(CONFIG.ALLOWED_HOSTS_LIST) or "কোনোটা নয়"))
+
+    # ডাউনলোড কিউ: ডেমোতে DemoRunner, নাহলে yt-dlp (Python মডিউল থাকলে সেটাই, নইলে CLI)
     if ARGS.demo:
-        print("ডেমো মোড: নেটওয়ার্ক কল হবে না — UI/ডাউনলোড ফ্লো টেস্ট করুন (\"/api/health\" দেখুন)")
+        runner = queue_mod.DemoRunner(CONFIG.DOWNLOAD_DIR, size=CONFIG.DEMO_SIZE,
+                                      delay=CONFIG.DEMO_DELAY)
+    else:
+        runner = queue_mod.YtdlpRunner(
+            download_dir=CONFIG.DOWNLOAD_DIR, temp_dir=CONFIG.TEMP_DIR,
+            output_template=CONFIG.OUTPUT_TEMPLATE, height=CONFIG.YTDLP_FORMAT_HEIGHT,
+            cookies=CONFIG.COOKIES, extractor_args=CONFIG.YTDLP_EXTRACTOR_ARGS)
+    QUEUE = queue_mod.DownloadQueue(CONFIG, runner,
+                                    notifier=lambda event, item: print("[queue] %s: %s"
+                                                                       % (event, item.get("id"))))
+    QUEUE.initialize()
+
+    httpd = ThreadingHTTPServer((CONFIG.HOST, CONFIG.PORT), Handler)
+    print("KaiOS Tube প্রোক্সি → http://%s:%d  (mode=%s, max_height=%dp, ytdlp=%s, concurrency=%d)"
+          % (CONFIG.HOST or "0.0.0.0", CONFIG.PORT, "demo" if ARGS.demo else "live",
+             CONFIG.MAX_HEIGHT, ARGS.ytdlp, CONFIG.MAX_CONCURRENT_DOWNLOADS))
+    print("ডাউনলোড ডিরেক্টরি: %s | স্টেট: %s" % (os.path.abspath(CONFIG.DOWNLOAD_DIR),
+                                                os.path.abspath(CONFIG.STATE_DIR)))
+    if ARGS.demo:
+        print("ডেমো মোড: নেটওয়ার্ক কল হবে না — UI/ডাউনলোড-কিউ ফ্লো টেস্ট করুন (/api/health দেখুন)")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
         print("\nবন্ধ করা হচ্ছে…")
+    finally:
+        if QUEUE is not None:
+            QUEUE.close()
     return 0
 
 

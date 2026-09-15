@@ -149,3 +149,7 @@ video { width: 100%; height: auto; background: #000; }
 #bar { height: 4px; background: #223049; position: relative; }
 #barFill { height: 100%; width: 0; background: #ffcf4a; }
 #spinner { padding: 10px 7px; font-size: 11px; color: #9fb0c8; }
+
+/* ---------- ডাউনলোড কিউ ---------- */
+.qbar { height: 3px; background: #223049; margin-top: 4px; }
+.qfill { height: 100%; background: #ffcf4a; }
